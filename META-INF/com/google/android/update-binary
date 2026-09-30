@@ -1,0 +1,129 @@
+#!/sbin/sh
+# Pipa dual boot - recovery installer. Vol Down = next option, Vol Up = select.
+OUTFD="$2"; ZIPFILE="$3"
+TMP=/tmp; B="$TMP/dualboot"; WORK="$TMP/dualboot-work"
+PARTDIRS="/dev/block/by-name /dev/block/bootdevice/by-name"
+
+say() { if [ -n "$OUTFD" ]; then printf 'ui_print %s\nui_print\n' "$1" > "/proc/self/fd/$OUTFD"; else echo "$1"; fi; }
+cleanup() { rm -rf "$B" "$WORK"; }
+fail() { say " "; say "ERROR: $1"; say "Nothing further was changed."; cleanup; exit 1; }
+bye() { say " "; say "$1"; cleanup; exit 0; }
+
+GETEVENT="$(command -v getevent 2>/dev/null)"; [ -n "$GETEVENT" ] || GETEVENT=/system/bin/getevent
+[ -x "$GETEVENT" ] || fail "getevent not found - cannot read the volume/power keys."
+
+read_key() {
+  rk=0
+  while :; do
+    ev="$($GETEVENT -lc 1 2>/dev/null)"
+    case "$ev" in
+      *KEY_VOLUMEUP*DOWN*)   KEY=up;    return ;;
+      *KEY_VOLUMEDOWN*DOWN*) KEY=down;  return ;;
+      "") rk=$((rk + 1)); [ "$rk" -ge 10 ] && fail "cannot read key events."; sleep 1 ;;
+    esac
+  done
+}
+
+# menu TITLE ITEM... -> MENU (1-based), MENU_ITEM
+menu() {
+  m_t="$1"; shift; m_n=$#; m_s=1
+  say " "; say "=== $m_t ==="; say "[Vol Down] next  [Vol Up] select"
+  m_i=1; for it in "$@"; do say "   $m_i) $it"; m_i=$((m_i + 1)); done
+  while :; do
+    eval "m_c=\${$m_s}"; say "  > $m_s) $m_c"
+    read_key
+    case "$KEY" in
+      down) m_s=$((m_s + 1)); [ "$m_s" -gt "$m_n" ] && m_s=1 ;;
+      up)   MENU=$m_s; eval "MENU_ITEM=\${$m_s}"; return ;;
+    esac
+  done
+}
+
+# choose LABEL DIR EXT -> CHOSEN (file name); asks only if several
+choose() {
+  c_l="$1"; c_d="$2"; c_e="$3"; set --
+  for f in "$c_d"/*."$c_e"; do [ -f "$f" ] && set -- "$@" "$(basename "$f")"; done
+  [ $# -gt 0 ] || fail "no *.$c_e in $c_d"
+  if [ $# -eq 1 ]; then CHOSEN="$1"; say "$c_l: $CHOSEN"; return; fi
+  c_n=$#; c_i=1
+  for c_f in "$@"; do eval "c_name$c_i=\$c_f"; c_i=$((c_i + 1)); done
+  c_i=1
+  for c_f in "$@"; do c_x="$(sed -n "${c_i}p" "$c_d/description.txt" 2>/dev/null)"; set -- "$@" "$c_f${c_x:+ - $c_x}"; c_i=$((c_i + 1)); done
+  shift "$c_n"
+  menu "$c_l" "$@"; eval "CHOSEN=\$c_name$MENU"
+}
+
+say " "; say "**** Pipa DualBoot (recovery) ****"
+case "$(uname -m)" in aarch64|arm64) ;; *) fail "arm64 only (this is $(uname -m))." ;; esac
+cleanup; rm -rf "$TMP/dualboot-x"; mkdir -p "$WORK" || fail "cannot create work folder in $TMP"
+unzip -o "$ZIPFILE" "Files/*" -d "$TMP/dualboot-x" >/dev/null 2>&1 || fail "cannot extract the zip"
+mv "$TMP/dualboot-x/Files" "$B" && rmdir "$TMP/dualboot-x" || fail "cannot set up $B"
+. "$B/core.sh"; set_bin "$B/bin/arm64"
+for f in "$MB" "$KP" "$UR"; do chmod 755 "$f" || fail "missing $f"; done
+for f in "$MB" "$KP"; do "$f" >/dev/null 2>&1; rc=$?; { [ $rc -eq 126 ] || [ $rc -eq 127 ]; } && fail "$(basename "$f") cannot run in this recovery."; done
+
+BKDIR=/sdcard/DualBoot/backups
+if mkdir -p "$BKDIR" 2>/dev/null && touch "$BKDIR/.w" 2>/dev/null; then rm -f "$BKDIR/.w"
+else BKDIR="$TMP/dualboot-backups"; mkdir -p "$BKDIR"; say "WARNING: /sdcard not writable - backups are kept in RAM only."; fi
+
+find_part() { for d in $PARTDIRS; do [ -e "$d/$1" ] && { PART="$(readlink -f "$d/$1" 2>/dev/null)"; return 0; }; done; return 1; }
+part_size() {
+  if [ -b "$1" ]; then s="$(blockdev --getsize64 "$1" 2>/dev/null)"; [ -n "$s" ] || s=$(( $(cat "/sys/class/block/$(basename "$1")/size") * 512 )); echo "$s"
+  else fsize "$1"; fi
+}
+
+menu "What do you want to do?" "Patch boot (also re-patches)" "Remove patch" "Restore a backup" "Exit"
+case "$MENU" in 4) bye "Nothing changed." ;; 3) ACTION=restore ;; 2) ACTION=unpatch ;; *) ACTION=patch ;; esac
+
+if [ "$ACTION" = restore ]; then
+  set --; for b in $(ls -t "$BKDIR"/boot_*.img 2>/dev/null | head -n 8); do set -- "$@" "$b"; done
+  [ $# -gt 0 ] || fail "no backups found in $BKDIR"
+  n=$#; menu "Pick a backup" "$@" "Cancel"; [ "$MENU" -gt "$n" ] && bye "Cancelled."
+  IMG="$MENU_ITEM"
+  case "$(basename "$IMG")" in boot_a-*) SLOT=boot_a ;; boot_b-*) SLOT=boot_b ;; *) fail "cannot tell the slot from the file name." ;; esac
+  find_part "$SLOT" || fail "$SLOT partition not found."
+  [ "$(fsize "$IMG")" -le "$(part_size "$PART")" ] || fail "backup is larger than $PART."
+  menu "Write it back to $SLOT?" "Yes" "No, cancel"; [ "$MENU" -eq 1 ] || bye "Cancelled."
+  write_verify "$IMG" || fail "write/verify FAILED on $PART. Do not reboot into this slot; run again."
+  bye "Restored $SLOT and verified."
+fi
+
+menu "Which boot partition? (active slot: $(getprop ro.boot.slot_suffix 2>/dev/null))" "boot_a" "boot_b"
+[ "$MENU" -eq 1 ] && SLOT=boot_a || SLOT=boot_b
+find_part "$SLOT" || fail "$SLOT partition not found."
+grep -q "^$PART " /proc/mounts 2>/dev/null && fail "$PART is mounted."
+PSIZE="$(part_size "$PART")"
+
+BACKUP="$BKDIR/$SLOT-$(date +%Y%m%d-%H%M%S).img"
+say "Backing up $SLOT..."
+dd if="$PART" of="$BACKUP" bs=1048576 2>/dev/null
+[ "$(fsize "$BACKUP")" -eq "$PSIZE" ] || fail "backup incomplete, nothing was written."
+say "Backup: $BACKUP"
+load_boot "$BACKUP"
+say "Kernel in $SLOT: $STATE"
+[ "$ACTION" = unpatch ] && [ "$STATE" != patched ] && bye "Kernel is not patched - nothing to remove."
+
+if [ "$ACTION" = patch ]; then
+  choose "UEFI image" "$B/fd" fd;  UEFI="$B/fd/$CHOSEN"
+  CFG="$(ls "$B"/cfg/*.cfg 2>/dev/null | head -n 1)"; [ -f "$CFG" ] || fail "no *.cfg in the zip"
+  choose "Shell code" "$B/sc" bin; SC="$B/sc/$CHOSEN"
+  SS="$(sed -n 's/^StackSize=\(0x[0-9A-Fa-f]*\).*/\1/p' "$CFG" | head -n 1)"
+  [ -z "$SS" ] || [ "$(fsize "$UEFI")" -le $((SS)) ] || fail "UEFI is larger than StackSize $SS."
+  ASK="Patch $SLOT with $(basename "$UEFI") + $(basename "$SC")?"
+  [ "$STATE" = patched ] && ASK="$SLOT is already patched. Re-patch it with $(basename "$UEFI") + $(basename "$SC")?"
+else
+  ASK="Remove the patch from $SLOT?"
+fi
+menu "$ASK" "Yes" "No, cancel"; [ "$MENU" -eq 1 ] || bye "Cancelled. Nothing changed."
+
+say "Building image..."
+build_img "$ACTION"
+say "Image OK: $NSIZE bytes, kernel check passed"
+say "Writing $SLOT..."
+if write_verify "$WORK/new.img"; then say "Written and verified."
+else
+  say "Verify failed - restoring the backup..."
+  write_verify "$BACKUP" || fail "RESTORE FAILED. Do not reboot. Backup: $BACKUP"
+  fail "write failed; original $SLOT restored."
+fi
+bye "Done. Undo: run this zip again -> Restore a backup."
