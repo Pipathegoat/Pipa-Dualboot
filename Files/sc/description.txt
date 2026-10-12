@@ -1,2 +1,3 @@
-Boots Linux when the magnetic cover is closed, otherwise Android
-Boots Linux when the tablet is in inverted landscape at boot, otherwise Android
+magnetic cover closed
+inverted landscape
+smart cover closed

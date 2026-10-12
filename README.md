@@ -9,7 +9,7 @@ This project patches the Android boot image (the `boot_a` kernel). At power-on, 
 - if it matches, the tablet starts the **UEFI**, and from there you boot **Linux**
 - if not, **Android** boots normally
 
-You choose the condition (a **shell code**): the magnetic cover, or the screen orientation.
+You choose the condition (a **shell code**): the magnetic cover, the smart cover, or the screen orientation.
 
 > The scripts were written with an LLM. Use with caution. Every method below makes a backup or leaves your original file untouched, but you still need a way to get back to a working Android (see [Undo](#undo)).
 
@@ -25,8 +25,18 @@ You choose the condition (a **shell code**): the magnetic cover, or the screen o
 |---|---|---|
 | `Pipa.Magnetic.cover` | magnetic cover is closed | Android |
 | `Pipa.Orientation` | tablet is in inverted landscape at boot | Android |
+| `Pipa.Smart.cover` | smart (non-magnetic) cover is closed | Android |
 
-The script lists them and asks you to pick one by number. The descriptions it shows come from `Files/sc/description.txt` (one line per shell code, alphabetical order).
+The script lists them and asks you to pick one by number. The descriptions it shows come from `Files/sc/description.txt` (one short line per shell code, in the same alphabetical order as the files).
+
+### Magnetic cover or Smart cover?
+
+Both shell codes read the same pin (the cover sensor, GPIO 110) and differ by **one byte**: which level means "go to UEFI".
+
+- **Magnetic**: UEFI when the pin reads high. This is the original behaviour.
+- **Smart**: UEFI when the pin reads low, which is what a closed smart cover produces on the tested tablet.
+
+If one doesn't react to your cover, try the other.
 
 ## 3 ways to patch
 
